@@ -1,39 +1,68 @@
 #!/usr/bin/env python3
-#To use this scraper you have to log in and save your cookies with an addon for firefox
 import os.path
 import sys
 import requests, json
 from bs4 import BeautifulSoup
-from urllib.parse import urlparse
 from urllib.parse import urljoin
 from playwright.async_api import async_playwright
 import asyncio
 from typing import Optional, Dict
 # load cookies (common format: list of dicts with name/value/domain/path)
-#load your cookies and save them with https://addons.mozilla.org/en-US/firefox/addon/cookie-quick-manager/ Addon for Firefox
 with open("cookies.json", "r", encoding="utf-8") as f:
     cookies = json.load(f)
-#have your cookies.json in the working directory of the script
 
+#there are generally two types of links
 # ----------------------------------------------------------------------
 # CONFIGURATION (edit these before running)
 # ----------------------------------------------------------------------
 # 1️⃣  Proxy – change to your real proxy host/port or comment out.
 PROXIES = {
-    #"http":  "socks5://IP:1080",
-    #"https": "socks5://IP:1080",
+
 }
 # 2️⃣  Custom User‑Agent (you can copy‑paste a real browser UA)
-#Change it to yours
 USER_AGENT = (
 "Mozilla/5.0 (X11; Linux x86_64; rv:145.0) Gecko/20100101 Firefox/145.0"
 )
-first_arg = sys.argv[1]
-#first_arg = "tu_angel_caotico"
-URL = f"https://coomer.st/onlyfans/user/{first_arg}"
-#VERY IMPORTANT, SET THE ROOT DIRECTORY, WHERE ALL DOWNLOADS WILL BE
-BASE_SAVE_URL = ""
-base_url = "https://coomer.st/"
+if "--versbose" in sys.argv:
+    VERBOSE = True
+else:
+    VERBOSE = False
+if "--no-proxy" in sys.argv:
+    PROXIES = {}
+else:
+    PROXIES = {
+   # "http":  "socks5://yourproxy.com:1080",
+   #"https": "socks5://yourproxy.com:1080",
+    }
+print("PROXIES: " + str(PROXIES))
+if "--no-download" in sys.argv:
+    NO_DOWNLOAD = True
+    print("NO_DOWNLOAD set to True")
+    print("Collecting all links and saving them.")
+    links_list = []
+else:
+    NO_DOWNLOAD = False
+if len(sys.argv) > 1:
+    first_arg = sys.argv[1]# first arg is username
+else:
+    print("Usage: scraper.py username on coomer.st platform ")
+    print("Example for https://coomer.st/fansly/user/286621667281612800 : scraper.py 286621667281612800 fansly")
+
+print(sys.argv)
+if "o" in sys.argv or "onlyfans" in sys.argv:
+    URL = f"https://coomer.st/onlyfans/user/{first_arg}"
+    PLATFORM = "onlyfans"
+elif "f" in sys.argv or "fansly" in sys.argv:
+    URL = f"https://coomer.st/fansly/user/{first_arg}"
+    PLATFORM = "fansly"
+else:
+    print("Specify platform with o/onlyfans or f/fansly")
+    exit()
+print("PLATFORM: " + PLATFORM)
+print("Selecting user link: " + URL)
+BASE_SAVE_URL = "/yout/path/for/downloads"
+print("BASE_SAVE_URL: " + BASE_SAVE_URL)
+base_url = "https://coomer.st"
 # ------------------------------------
 # Image file extensions (no leading '.')
 # ------------------------------------
@@ -53,6 +82,8 @@ VIDEO_EXTS = {
     "f4v", "qt", "mp4v",
 }
 
+
+TIMEOUT_SECS = 600
 def download_file(
     url: str,
     dest: str,
@@ -76,6 +107,35 @@ def download_file(
                 if chunk:
                     fh.write(chunk)
 
+def download_file_(
+    url: str,
+    dest: str,
+    filename: str,
+    *,
+    timeout: int | None = 60,
+    proxies: Optional[Dict[str, str]] = None,
+) -> None:
+    os.makedirs(dest, exist_ok=True)
+    path = os.path.join(dest, filename)
+
+    req_kwargs = {"timeout": timeout}
+    if proxies:
+        req_kwargs["proxies"] = proxies
+
+    resp = requests.get(url, **req_kwargs)
+    try:
+        resp.raise_for_status()
+        # downloads all at once (keeps the whole response in memory)
+        with open(path, "wb") as fh:
+            fh.write(resp.content)
+    finally:
+        resp.close()
+
+
+def save_txt(path, content):
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+
 async def scrape_content_page(URL, browser, context):
     async with async_playwright() as p:
         page = await browser.new_page()
@@ -83,29 +143,93 @@ async def scrape_content_page(URL, browser, context):
         html = await page.content()
         soup = BeautifulSoup(html, "html.parser")
         #print(soup.title.get_text(strip=True) if soup.title else "no title")
-        post_content = soup.find("div", class_="post__content")
+        try:
+            post_content = soup.find("div", class_="post__content").text
+        except Exception as e:
+            post_content = ""
+            if VERBOSE:
+                print("No caption found for this post.")
         #hrefs = [href['href'] for href in soup.find_all("a", href=True) if h]
         data_hrefs = [href['href'] for href in soup.find_all("a") if "data" in href['href']]
         attachments = soup.find_all("a", class_="post__attachment-link")
         print("Found", str(len(data_hrefs)), "files.")
         user_dir = f"{BASE_SAVE_URL}/{first_arg}"
         i = 0
+
         for data_href in data_hrefs:
             format = data_href.split(".")[-1]
             #filename = f"{first_arg}_{i}.{format}"
             filename = data_href.split("?f=")[-1]
+            content_filename = filename.split(".")[0] + ".txt"
+            #print(f"Content filename: {content_filename}")
+
             if format in IMAGE_EXTS:
-                if not os.path.exists(f"{user_dir}/images/{filename}"):
-                    print("Downloading image: " + data_href)
-                    download_file(url=data_href, dest=f"{user_dir}/images/", filename=filename, chunk_size=8192, timeout=60, proxies=PROXIES)
+                if not post_content == "":
+                    if VERBOSE:
+                        print(post_content)
+                    if not os.path.exists(f"{user_dir}/images/{content_filename}"):
+                        #print("Saving txt: " + post_content)
+                        save_txt(f"{user_dir}/images/{content_filename}", post_content)
+                    else:
+                        if VERBOSE:
+                            print("Text already saved: " + content_filename)
+                if not os.path.exists(f"{user_dir}/images/{filename}") and not NO_DOWNLOAD:
+                    if VERBOSE:
+                        print("Downloading image: " + data_href)
+                    i = 1
+                    while i != 10:
+                        try:
+                            download_file(url=data_href, dest=f"{user_dir}/images/", filename=filename, timeout=TIMEOUT_SECS, proxies=PROXIES)
+                            #print(f"Image {filename} downloaded successfully.")
+                            break
+                        except Exception as e:
+                            print(e)
+                            print("Retry number: " + str(i))
+                            i += 1
+                            pass
+
                 else:
-                    print("Image already downloaded: " + filename)
-            elif data_href.split(".")[-1] in VIDEO_EXTS:
-                if not os.path.exists(f"{user_dir}/videos/{filename}"):
-                    print("Downloading video: " + data_href)
-                    download_file(url=data_href, dest=f"{user_dir}/videos/", filename=filename, chunk_size=8192, timeout=60, proxies=PROXIES)
+                    if VERBOSE:
+                        print("Image already downloaded: " + filename)
+                if NO_DOWNLOAD:
+                    print(data_href)
+                    links_list.append(data_href)
+            elif format in VIDEO_EXTS:
+                if not post_content == "":
+                    if not os.path.exists(f"{user_dir}/videos/{content_filename}"):
+                        if VERBOSE:
+                            print("Saving txt: " + post_content)
+                        save_txt(f"{user_dir}/images/{content_filename}", post_content)
+                    #else:
+                    #    print("Text already saved: " + content_filename)
+                    #    print(post_content)
+                if not os.path.exists(f"{user_dir}/videos/{filename}") and not NO_DOWNLOAD:
+                    if VERBOSE:
+                        print("Downloading video: " + data_href)
+                    i = 1
+                    while i != 10:
+                        try:
+                            download_file(url=data_href, dest=f"{user_dir}/videos/", filename=filename, timeout=TIMEOUT_SECS, proxies=PROXIES)
+                            if VERBOSE:
+                                print(f"Video {filename} downloaded successfully.")
+                            break
+                        except Exception as e:
+                            print(e)
+                            print("Retry number: " + str(i))
+                            i += 1
+                            pass
                 else:
-                    print("Video already downloaded: " + filename)
+                    if VERBOSE:
+                        print("Video already downloaded: " + filename)
+                if NO_DOWNLOAD:
+                    print(data_href)
+                    links_list.append(data_href)
+        await page.close()
+
+def write_list_to_file(links_list):
+    with open(f"{BASE_SAVE_URL}/{first_arg}/links.txt", "w", encoding="utf-8") as f:
+        for link in links_list:
+            f.write(link + "\n")
 
 async def scraper_user(URL: Optional[str]):
     async with async_playwright() as p:
@@ -130,21 +254,26 @@ async def scraper_user(URL: Optional[str]):
             if int(href.split("=")[-1]) < 0:
                 hrefs_user.remove(href)
         hrefs_user = list(set(hrefs_user))
-
-        fancy_links_leads_to_other_content_pages = soup.find_all('a.fancy-link')
-        #scrape posts on landing user page
-        for href in hrefs_post:
-            print("Scraping init page: ", urljoin(base_url, href))
-            await scrape_content_page(urljoin(base_url, href), browser=browser, context=context)
-        #scrape posts on other found pages
-        for content_page in fancy_links_leads_to_other_content_pages:
-            print("Navigating to content page: " + f"{URL}/{content_page["url"]}")
-            await page.goto(f"{URL}/{content_page["url"]}", wait_until="networkidle")
+        i = 50
+        while True:
+            if i >= 1250:
+                exit()
+            content_page = f"{base_url}/{PLATFORM}/user/{first_arg}?o={i}"
+            print("Navigating to content page: " + f"{content_page}")
+            await page.goto(content_page, wait_until="networkidle")
             html = await page.content()
             soup = BeautifulSoup(html, "html.parser")
             hrefs_post = [link['href'] for link in soup.find_all("a", href=True) if link["href"].__contains__("/post/")]
+            print(f"Found {len(hrefs_post)} posts.")
+            if len(hrefs_post) == 0:
+                if VERBOSE:
+                    print("Since on this page there are no posts found, we are considering that we have already scraped all content.\n Exiting...")
+                    write_list_to_file(links_list)
+                    exit()
             for href in hrefs_post:
-                print("Scraping content page: ", urljoin(base_url, href))
-                await scrape_content_page(f"{base_url}/{href}", browser=browser, context=context)
-            await browser.close()
+                content_url = urljoin(base_url, href)
+                if VERBOSE:
+                    print("Scraping content page: ", content_url)
+                await scrape_content_page(content_url, browser=browser, context=context)
+            i += 50
 asyncio.run(scraper_user(URL))
