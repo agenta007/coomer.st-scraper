@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 import os.path
 import sys
-import requests, json
+
+import requests, json, yt_dlp
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 from playwright.async_api import async_playwright
@@ -11,44 +12,44 @@ from typing import Optional, Dict
 with open("cookies.json", "r", encoding="utf-8") as f:
     cookies = json.load(f)
 
+#https://coomer.st/fansly/user/286621667281612800
+#https://coomer.st/onlyfans/user/sethifanz
 #there are generally two types of links
 # ----------------------------------------------------------------------
 # CONFIGURATION (edit these before running)
 # ----------------------------------------------------------------------
+#YT_DLP RATE LIMIT
+RATELIMIT = 100000 * 1024
 # 1️⃣  Proxy – change to your real proxy host/port or comment out.
 PROXIES = {
-
+    # "http":  "socks5://domain_or_ip:port",
+    # "https": "socks5://domain_or_ip.:port",
 }
 # 2️⃣  Custom User‑Agent (you can copy‑paste a real browser UA)
 USER_AGENT = (
 "Mozilla/5.0 (X11; Linux x86_64; rv:145.0) Gecko/20100101 Firefox/145.0"
 )
-if "--versbose" in sys.argv:
+if "--verbose" in sys.argv:
     VERBOSE = True
+
 else:
     VERBOSE = False
+print("VERBOSE: " + str(VERBOSE))
 if "--no-proxy" in sys.argv:
     PROXIES = {}
 else:
     PROXIES = {
-   # "http":  "socks5://yourproxy.com:1080",
-   #"https": "socks5://yourproxy.com:1080",
+        "http": "socks5://espobuilt.com:1080",
+        "https": "socks5://espobuilt.com:1080",
     }
 print("PROXIES: " + str(PROXIES))
-if "--no-download" in sys.argv:
-    NO_DOWNLOAD = True
-    print("NO_DOWNLOAD set to True")
-    print("Collecting all links and saving them.")
-    links_list = []
-else:
-    NO_DOWNLOAD = False
+
 if len(sys.argv) > 1:
     first_arg = sys.argv[1]# first arg is username
 else:
     print("Usage: scraper.py username on coomer.st platform ")
     print("Example for https://coomer.st/fansly/user/286621667281612800 : scraper.py 286621667281612800 fansly")
 
-print(sys.argv)
 if "o" in sys.argv or "onlyfans" in sys.argv:
     URL = f"https://coomer.st/onlyfans/user/{first_arg}"
     PLATFORM = "onlyfans"
@@ -58,10 +59,18 @@ elif "f" in sys.argv or "fansly" in sys.argv:
 else:
     print("Specify platform with o/onlyfans or f/fansly")
     exit()
-print("PLATFORM: " + PLATFORM)
-print("Selecting user link: " + URL)
-BASE_SAVE_URL = "/yout/path/for/downloads"
-print("BASE_SAVE_URL: " + BASE_SAVE_URL)
+BASE_SAVE_URL = "/mnt/wdblue2/.of"
+if VERBOSE:
+    print("PLATFORM: " + PLATFORM)
+    print("Selecting user link: " + URL)
+    print("BASE_SAVE_URL: " + BASE_SAVE_URL)
+if "--restart" in sys.argv:
+    iterator_f = f"{BASE_SAVE_URL}/{first_arg}/iterator.txt"
+    if os.path.exists(iterator_f):
+        os.remove(iterator_f)
+        print("Deleted iterator.txt for " + first_arg)
+
+print(sys.argv)
 base_url = "https://coomer.st"
 # ------------------------------------
 # Image file extensions (no leading '.')
@@ -84,6 +93,8 @@ VIDEO_EXTS = {
 
 
 TIMEOUT_SECS = 600
+LINKS_COLLECTOR = []
+
 def download_file(
     url: str,
     dest: str,
@@ -136,7 +147,7 @@ def save_txt(path, content):
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
 
-async def scrape_content_page(URL, browser, context):
+async def scrape_content_page(URL, browser, context, page_n):
     async with async_playwright() as p:
         page = await browser.new_page()
         await page.goto(URL, wait_until="networkidle")
@@ -151,85 +162,138 @@ async def scrape_content_page(URL, browser, context):
                 print("No caption found for this post.")
         #hrefs = [href['href'] for href in soup.find_all("a", href=True) if h]
         data_hrefs = [href['href'] for href in soup.find_all("a") if "data" in href['href']]
+        LINKS_COLLECTOR.append(data_hrefs)
         attachments = soup.find_all("a", class_="post__attachment-link")
-        print("Found", str(len(data_hrefs)), "files.")
-        user_dir = f"{BASE_SAVE_URL}/{first_arg}"
-        i = 0
+
+        if VERBOSE:
+            print(f"{URL} has", str(len(data_hrefs)), "files.")
+        if PLATFORM == "onlyfans":
+            username = first_arg
+            user_dir = f"{BASE_SAVE_URL}/{username}"
+        elif PLATFORM == "fansly":
+            username = soup.find("a", class_="post__user-name").get_text(strip=True)
+            user_dir = f"{BASE_SAVE_URL}/{username}"
+        os.makedirs(f"{user_dir}/images", exist_ok=True)
+        os.makedirs(f"{user_dir}/videos", exist_ok=True)
+        if len(attachments) > 0:
+            if VERBOSE:
+                print(f"Found {len(attachments)} attachments.")
+            LINKS_COLLECTOR.append(attachments)
+            #SCRAPE ATTACHMENTS
+            for attachment in attachments:
+                format = attachment['href'].split(".")[-1]
+                filename = attachment['href'].split("?f=")[-1]
+                if VERBOSE:
+                    print(f"Downloading attachment: {filename}")
+                if format in IMAGE_EXTS:
+                    download_file(url=attachment['href'], dest=f"{user_dir}/images/", filename=filename, timeout=TIMEOUT_SECS, proxies=PROXIES)
+                elif format in VIDEO_EXTS:
+                    i = 1
+                    while i != 10:
+                        try:
+                            #download_file(url=attachment['href'], dest=f"{user_dir}/videos/", filename=filename, timeout=TIMEOUT_SECS, proxies=PROXIES)
+                            ydl_opts = {
+                                'outtmpl': BASE_SAVE_URL + "/" + username + "/videos/" + filename,
+                                'ratelimit': RATELIMIT,  # Limit download speed to 100KB/s
+                                'retries': 10,  # Retry failed downloads up to 10 times
+                                'fragment_retries': 10,
+                                'skip_unavailable_fragments': True,
+                                'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',  # Mimic browser
+                                # add other options as needed
+                            }
+                            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                                ydl.download(attachment['href'])
+                            break
+                        except Exception as e:
+                            print(e)
+                            print("Retrying attachment download: " + str(i))
+                            i += 1
+                            pass
+            return
 
         for data_href in data_hrefs:
             format = data_href.split(".")[-1]
-            #filename = f"{first_arg}_{i}.{format}"
             filename = data_href.split("?f=")[-1]
             content_filename = filename.split(".")[0] + ".txt"
-            #print(f"Content filename: {content_filename}")
 
             if format in IMAGE_EXTS:
                 if not post_content == "":
-                    if VERBOSE:
-                        print(post_content)
                     if not os.path.exists(f"{user_dir}/images/{content_filename}"):
-                        #print("Saving txt: " + post_content)
                         save_txt(f"{user_dir}/images/{content_filename}", post_content)
                     else:
                         if VERBOSE:
                             print("Text already saved: " + content_filename)
-                if not os.path.exists(f"{user_dir}/images/{filename}") and not NO_DOWNLOAD:
+                if not os.path.exists(f"{user_dir}/images/{filename}"):
                     if VERBOSE:
                         print("Downloading image: " + data_href)
                     i = 1
                     while i != 10:
                         try:
                             download_file(url=data_href, dest=f"{user_dir}/images/", filename=filename, timeout=TIMEOUT_SECS, proxies=PROXIES)
-                            #print(f"Image {filename} downloaded successfully.")
                             break
                         except Exception as e:
                             print(e)
-                            print("Retry number: " + str(i))
+                            print("Retrying image download: " + str(i))
                             i += 1
                             pass
 
                 else:
                     if VERBOSE:
                         print("Image already downloaded: " + filename)
-                if NO_DOWNLOAD:
-                    print(data_href)
-                    links_list.append(data_href)
+
             elif format in VIDEO_EXTS:
                 if not post_content == "":
                     if not os.path.exists(f"{user_dir}/videos/{content_filename}"):
-                        if VERBOSE:
-                            print("Saving txt: " + post_content)
-                        save_txt(f"{user_dir}/images/{content_filename}", post_content)
-                    #else:
-                    #    print("Text already saved: " + content_filename)
-                    #    print(post_content)
-                if not os.path.exists(f"{user_dir}/videos/{filename}") and not NO_DOWNLOAD:
+                        save_txt(f"{user_dir}/videos/{content_filename}", post_content)
+                if not os.path.exists(f"{user_dir}/videos/{filename}"):
                     if VERBOSE:
                         print("Downloading video: " + data_href)
                     i = 1
                     while i != 10:
                         try:
-                            download_file(url=data_href, dest=f"{user_dir}/videos/", filename=filename, timeout=TIMEOUT_SECS, proxies=PROXIES)
+                            #download_file(url=data_href, dest=f"{user_dir}/videos/", filename=filename, timeout=TIMEOUT_SECS, proxies=PROXIES)
+                            ydl_opts = {
+                                'outtmpl': BASE_SAVE_URL + "/" + username + "/videos/" + filename,
+                                'ratelimit': RATELIMIT,  # Limit download speed to 100KB/s
+                                'retries': 10,  # Retry failed downloads up to 10 times
+                                'fragment_retries': 10,
+                                'skip_unavailable_fragments': True,
+                                'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',  # Mimic browser
+                                # add other options as needed
+                            }
+                            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                                ydl.download(data_href)
+                                ydl.close()
                             if VERBOSE:
                                 print(f"Video {filename} downloaded successfully.")
                             break
                         except Exception as e:
                             print(e)
-                            print("Retry number: " + str(i))
+                            print("Retrying video download: " + str(i))
                             i += 1
                             pass
                 else:
                     if VERBOSE:
                         print("Video already downloaded: " + filename)
-                if NO_DOWNLOAD:
-                    print(data_href)
-                    links_list.append(data_href)
-        await page.close()
+            write_iterator(page_n, URL, username)
+        #await page.close()
+        #await browser.close()
 
-def write_list_to_file(links_list):
+def write_list_to_file(LINKS_COLLECTOR):
     with open(f"{BASE_SAVE_URL}/{first_arg}/links.txt", "w", encoding="utf-8") as f:
-        for link in links_list:
-            f.write(link + "\n")
+        for link in LINKS_COLLECTOR:
+            f.write(str(link) + "\n")
+    print(f"Wrote {str(len(LINKS_COLLECTOR))} links. to {BASE_SAVE_URL}/{first_arg}/links.txt")
+
+def write_iterator(page_n, post_n, username):
+    with open(f"{BASE_SAVE_URL}/{username}/iterator.txt", "w", encoding="utf-8") as f:
+        f.write(str(page_n) + "\n")
+        f.write(str(post_n.split("/")[-1]) + "\n")
+
+def read_iterator(username):
+    with open(f"{BASE_SAVE_URL}/{username}/iterator.txt", "r", encoding="utf-8") as f:
+        lines = f.readlines()
+        return (lines[0].strip(), lines[1].strip())
 
 async def scraper_user(URL: Optional[str]):
     async with async_playwright() as p:
@@ -248,32 +312,70 @@ async def scraper_user(URL: Optional[str]):
         html = await page.content()
         soup = BeautifulSoup(html, "html.parser")
         print(soup.title.get_text(strip=True) if soup.title else "no title")
-        hrefs_post = [link['href'] for link in soup.find_all("a", href=True) if link["href"].__contains__("/post/")]
+        #hrefs_post = [link['href'] for link in soup.find_all("a", href=True) if link["href"].__contains__("/post/")]
         hrefs_user = [link['href'] for link in soup.find_all("a", href=True) if link["href"].__contains__("?o") and link["href"].__contains__(first_arg)]
         for href in hrefs_user:
             if int(href.split("=")[-1]) < 0:
                 hrefs_user.remove(href)
-        hrefs_user = list(set(hrefs_user))
-        i = 50
-        while True:
-            if i >= 1250:
-                exit()
-            content_page = f"{base_url}/{PLATFORM}/user/{first_arg}?o={i}"
-            print("Navigating to content page: " + f"{content_page}")
+        #hrefs_user = list(set(hrefs_user))
+
+        #scraper first page, if iterator does not exist
+        isIterator = False
+        if not os.path.exists(f"{BASE_SAVE_URL}/{first_arg}/iterator.txt"):
+            content_page = f"{base_url}/{PLATFORM}/user/{first_arg}"
             await page.goto(content_page, wait_until="networkidle")
             html = await page.content()
             soup = BeautifulSoup(html, "html.parser")
             hrefs_post = [link['href'] for link in soup.find_all("a", href=True) if link["href"].__contains__("/post/")]
-            print(f"Found {len(hrefs_post)} posts.")
-            if len(hrefs_post) == 0:
-                if VERBOSE:
-                    print("Since on this page there are no posts found, we are considering that we have already scraped all content.\n Exiting...")
-                    write_list_to_file(links_list)
-                    exit()
             for href in hrefs_post:
                 content_url = urljoin(base_url, href)
                 if VERBOSE:
+                    print("Scraping post page: ", content_url)
+                await scrape_content_page(content_url, browser=browser, context=context, page_n="0")
+            i = 50
+        #first page scraped
+        else:
+            isIterator = True
+            if PLATFORM == "onlyfans":
+                username = first_arg
+            elif PLATFORM == "fansly":
+                username = soup.find("a", class_="post__user-name").get_text(strip=True)
+            iterator_tuple = read_iterator(username)
+            print(f"ReadIterator: platform={PLATFORM}\no?={iterator_tuple[0]}\n{iterator_tuple[1]}")
+            i = int(iterator_tuple[0])
+            post_to_scrape = int(iterator_tuple[1])
+
+        while True:
+            await browser.close()
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context()
+            page = await context.new_page()
+            content_page = f"{base_url}/{PLATFORM}/user/{first_arg}?o={i}"
+            if VERBOSE:
+                print("Navigating to content page: " + f"{content_page}")
+            await page.goto(content_page, wait_until="networkidle")
+            html = await page.content()
+            soup = BeautifulSoup(html, "html.parser")
+            hrefs_post = [link['href'] for link in soup.find_all("a", href=True) if link["href"].__contains__("/post/")]
+            if VERBOSE:
+                print(f"{content_page} has {len(hrefs_post)} post pages.")
+            if len(hrefs_post) == 0:
+                if VERBOSE:
+                    print("Since on this page there are no posts found, we are considering that we have already scraped all content.\nExiting...")
+                    write_list_to_file(LINKS_COLLECTOR)
+                    await browser.close()
+                    exit()
+            for href in hrefs_post:
+                if isIterator:
+                    post_ = int(href.split("/")[-1])
+                    if post_ != post_to_scrape:
+                        continue
+                content_url = urljoin(base_url, href)
+                if VERBOSE:
                     print("Scraping content page: ", content_url)
-                await scrape_content_page(content_url, browser=browser, context=context)
+                await scrape_content_page(content_url, browser=browser, context=context, page_n=str(i))
+
+                if VERBOSE:
+                    print(f"Iterator={i}, post={href}")
             i += 50
 asyncio.run(scraper_user(URL))
